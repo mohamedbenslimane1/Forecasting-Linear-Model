@@ -1,0 +1,322 @@
+---
+title: 'Projet MLG: Hammadi, Benslimane, Roan, Sefraoui'
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-01-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r,include=FALSE}
+rm(list=ls())
+set.seed(2023)
+
+#On exporte les librairies
+library('MASS');library('knitr');library('ggplot2');library('cowplot');library('reshape2');
+library('dplyr');library('GGally');library('corrplot');library('carData');library('car');library('questionr')
+library('multcomp');library('dplyr');library('leaps');library("GGally")
+library("ROCR");library("gplots");library("gtools");library("gridExtra")
+library("gplots")
+```
+
+------------------------------
+Introduction:
+------------------------------
+
+Notre but: Expliquer et prédire Y=Class à partir de X1,..,X7=Area,"Perimeter","Major_Axis_Length","Minor_Axis_Length","Eccentricity","Convex_Area","Extent".
+La variable Y à prédire est à valeurs dans { "Cammeo" , "Osmancik" }, on pense donc à un modèle de régression logistique.
+
+
+--------------------------------------------
+PARTIE 1: Analyse empirique descriptive détaillée des données sur le datatrain
+--------------------------------------------
+
+
+
+```{r}
+train=read.csv("rice_train.csv", sep=';')    #on charge le dataset train
+
+
+```
+
+On fait correspondre le type de riz Cammeo avec le chiffre 1 et 0 pour le type Osmancik pour pouvoir faire appel à une régression logistique plus tard.
+
+```{r}
+train$Class[train$Class=="Cammeo"]=1
+train$Class[train$Class=="Osmancik"]=0
+train$Class=as.numeric(train$Class)
+head(train)
+```
+```{r,include=FALSE}
+str(train)    #donne la nature des variables
+attach(train)    #permet de bien definir le nom des colonnes
+names(train)
+```
+
+À partir de cette ligne notre trainset est noté base, on a juste mis la variable Class en premier par soucis d'esthetique.
+```{r,include=FALSE}
+base=subset(train, select=c(Class, Area, Perimeter,Major_Axis_Length,Minor_Axis_Length,Eccentricity,Convex_Area,Extent)) 
+head(base)    
+tail(base)
+str(base)
+summary(base)
+```
+
+On voit que la variable de sortie Class a été traitée comme une variable numérique,
+On va donc la transformer en type facteur.
+
+```{r}
+base$Class<-factor(base$Class)
+summary(base)
+```
+
+Après affichage du summary, on voit donc que l'on a 1750 grains de riz de type "Osmancik" et 1298 de type "Cammeo" dans notre trainset.
+Maintenant pour avoir une idée de la distribution des variables explicatives et de la redondance/forte corrélation de certaines,(que l'on ecartera plus tard par méthode forward), on étudie les histogrammes et box plots suivants:
+
+```{r}
+par(mar=rep(2,4))
+par(mfrow=c(4,2))
+hist(x=Area, col="blue",main='Area',xlab="",ylab="")
+hist(x=Perimeter, col="green",main="Perimeter",xlab="",ylab="")
+hist(x=Major_Axis_Length,col="red",main="Major_Axis_Length",xlab="",ylab="")
+hist(x=Minor_Axis_Length, col="purple", main="Minor_Axis_Length",xlab="",ylab="")
+hist(x=Eccentricity, col="orange", main="Eccentricity",xlab="",ylab="")
+hist(x=Convex_Area, col="yellow", main="Convex_Area",xlab="",ylab="")
+hist(x=Extent, col='gray',main="Extent",xlab="",ylab="")
+```
+
+Graphiquement on remarque que les variables Area et Convex_Area sont distribuées 
+de la même façon, de même pour les variables Major_Axis_Length et Perimeter.
+
+```{r,include=FALSE}
+p1=ggplot(base,aes(x=Class,y=Area)) + geom_boxplot()
+p2=ggplot(base,aes(x=Class,y=Perimeter)) + geom_boxplot()
+p3=ggplot(base,aes(x=Class,y=Major_Axis_Length)) + geom_boxplot()
+p4=ggplot(base,aes(x=Class,y=Minor_Axis_Length)) + geom_boxplot()
+p5=ggplot(base,aes(x=Class,y=Eccentricity)) + geom_boxplot()
+p6=ggplot(base,aes(x=Class,y=Convex_Area)) + geom_boxplot()
+p7=ggplot(base,aes(x=Class,y=Extent)) + geom_boxplot()
+```
+```{r}
+grid.arrange(p1, p2, p3,p4,p5,p6,p7 ,ncol=2,nrow=4)
+```
+
+Ces box plots disent que les variables Minor_Axis_Length, Eccentricity, Extent 
+Influent peu sur le caractère Cammeo ou Osmancik, on s'attend donc à ce que la méthode forward de sélection de modèle les écarte. 
+
+Pour avoir des renseignements sur les éventuelles corrélations entre les variables, analysons le corrplot suivant:
+```{r}
+corrplot(round(cor(train),2),method="ellipse")
+
+```
+
+On remarque par exemple que Major_Axis_Length est fortement corrélée à Perimeter.
+
+
+-------------------------------------------------------------
+--------------------------------------------------
+PARTIE 2: Selection de modèle, validation du modèle, étude d’outliers
+
+Tout d'abord comme pour le trainset, on transforme la variable Class en valeurs binaires.
+
+```{r}
+test=read.csv("rice_test.csv", sep=';')
+test$Class[test$Class=="Cammeo"]=1
+test$Class[test$Class=="Osmancik"]=0
+test$Class=as.numeric(test$Class)
+test=subset(test, select=c(Class, Area, Perimeter,Major_Axis_Length,Minor_Axis_Length,Eccentricity,Convex_Area,Extent))
+test$Class<-factor(test$Class)
+```
+```{r,include=FALSE}
+summary(test)
+```
+
+a)Sélection de modèle
+
+On va voir quelles variables introduire dans le modèle de regression logistique.
+Pour sélectionner le bon modèle, on va procéder avec les méthodes: forward puis both. 
+
+Méthode Forward: on part de l'intercept, et on ajoute les variables significatives au fur et à mesure.
+```{r}
+str_reduit_intersect<-"~1" #modèle réduit à l'intersect
+str_complet<-"~Area+Perimeter+Major_Axis_Length+Minor_Axis_Length+Eccentricity+Convex_Area+Extent" #modèle avec toutes les variables
+
+modele<-glm(Class~1, data=base, family=binomial)
+modele.forward<-stepAIC(modele,scope=list(lower=str_reduit_intersect, upper=str_complet), trace=TRUE, data=base, direction="forward")
+```
+```{r,include=FALSE}
+summary(modele.forward)
+```
+
+On obtient à la fin avec la méthode forward, un modèle contenant 5 variables et non 7,
+Ces 5 variables sont: Major_Axis_Length, Convex_Area, Minor_Axis_Length, Area, Perimeter.
+
+Confirmons tout cela avec la méthode both.
+Méthode Both: utilise les deux directions
+
+```{r}
+modele<-glm(Class~1, data=base, family=binomial)
+modele.stepwise<-stepAIC(modele, scope=list(lower=str_reduit_intersect, upper=str_complet), trace=TRUE, data=base, direction="both")
+```
+```{r, include=FALSE}
+summary(modele.stepwise)
+```
+
+Encore une fois, on remarque que les variables sélectionnées par la méthode both sont les mêmes que dans la méthode forward.
+
+
+b) Régression logistique
+
+On est dans une situation où notre variable de sortie Class peut prendre deux valeurs soit 0, soit 1, le modèle logit est donc adéquat
+
+```{r}
+logit=function(formula, lien="logit", data=NULL){
+  glm(formula, family=binomial(link=lien), data)
+}
+
+mod_logit<-logit(Class~Major_Axis_Length+Convex_Area+Minor_Axis_Length+Area+Perimeter, data=base) #On ne sélectionne que les 5 variables sélectionnées par nos méthodes
+
+#Les coefficients du modeles de regression sont
+
+coef(mod_logit)
+
+```
+
+Ainsi, notre modèle de régression logistique s'écrit de la manière suivante : 
+
+$\log(\hat{p}(x)/(1-\hat{p}(x))=-3.436830449+0.172444204*MajorAxisLength+0.009436211*ConvexArea-0.415393776*MinorAxisLength-0.005732531*Area-0.095599734*Perimeter$
+
+c)Validation du modèle
+
+On va maintenant étudier la regression pour voir si on valide ou non le modèle.
+
+Tout d'abord, nous allons pour cela nous intéresser aux résidus de déviance, même si c'est relatif au programme de M2, on a découvert sur internet que la méthode d'analyse des résidus de déviance était fortement conseillée:
+
+```{r}
+par(mfrow=c(1,1))
+plot(rstudent(mod_logit), ylab="Résidus studentisés",ylim=c(-3,3) ,type="p",col="purple", )
+#Les résidus étant généralement compris entre -2 et 2 on délimitera l'ordonnée de -3 à 3
+abline(h=c(-2,2), col='red')
+#On remarque qu'il y a très peu de valeurs aberrantes, c'est à dire des valeurs hors de l'intervalle entre -2 et 2.C'est bon signe
+```
+
+d)Etude des outliers
+
+```{r}
+plot(mod_logit,5)
+influenceIndexPlot(mod_logit,vars="hat")  # montre les Outliers à fort effet de levier sur le modèle
+```
+
+
+On voit donc par exemple que rares sont les individus a fort effet de levier, tels que l'individu 2730 et 2931. 
+On conseille donc une analyse approfondie de ces outliers (M2)
+
+---------------------------------------------------
+PARTIE 3: Prediction de la variable d’interet et evaluation du modele sur les donnees test
+
+
+On utilise maintenant la fonction predict qui nous donne 3 colonnes supplementaires a partir du dataset train, 
+ces 3 colonnes,fit,se.fit et residual.scale nous permettent de voir si notre modele fit bien avec nos données initiales. 
+Puis a l'aide de la fonction within, on obtient les probabilites predites par notre modele de regresssion a l'aide
+de la fonction sigmoide, qui nous donne la probabilite d'appartenir a l'espece Osmansick ou Cammeo.
+Si la proba predite de chaque individu du dataset est >0.5, alors notre individu est Cammeo, sinon il est Osmansick.
+
+```{r}
+train_pred=cbind(base, predict(mod_logit,newdata=base,type="link",se=TRUE))
+head(train_pred)
+train_pred=within(train_pred,{PredictedProb<-plogis(fit)
+LL<-plogis(fit-(1.96*se.fit))
+UL<-plogis(fit+(1.96*se.fit))})
+tail(train_pred)
+train_pred=cbind(train_pred, pred.Class=factor(ifelse(train_pred$PredictedProb>0.5,1,0)))
+head(train_pred)
+```
+
+Nos probabilites predites sont donc dans ce tableau dont nous montrons le debut:
+```{r}
+head(train_pred$PredictedProb)
+```
+
+Notre matrice de confusion pour le trainset est:
+
+```{r}
+confusion_matrix<-as.matrix(table(train_pred$pred.Class,train_pred$Class))
+confusion_matrix
+```
+
+Notre taux d'erreur sur le trainset est donc 
+
+```{r,include=FALSE}
+calcul_erreur<-function(y,y_pred){
+  ans<-table(y,y_pred)
+  k<-(ans[1,2]+ans[2,1])/sum(ans)
+  print(k)
+}
+```
+```{r}
+calcul_erreur(train_pred$pred.Class,train_pred$Class)
+```
+
+On calcule l'erreur entre les résultats du dataset train et les resultats obtenu par les prédictions de la régression logistique
+On trouve un taux d'erreur d'environ 0.0675853, ce qui est une bonne Performanceormance pour notre modèle
+
+On fait de même pour le dataset test
+
+```{r,include=FALSE}
+test_p=cbind(test, predict(mod_logit,newdata=test,type='response',se=TRUE))
+test_p=cbind(test_p,pred.Class<-factor(ifelse(test_p$fit>0.5,1,0)))
+```
+
+La matrice de confusion pour le traintest est donc
+```{r}
+confusion_matrixtest=as.matrix(table(test_p$pred.Class,test_p$Class))
+confusion_matrixtest=unclass(confusion_matrixtest)
+confusion_matrixtest
+calcul_erreur(test_p$pred.Class,test_p$Class)
+```
+
+On trouve pour le train test un taux d'erreur de 0.06955381
+
+```{r,include=FALSE}
+require(ROCR)
+```
+
+
+Utilisons maintenant les courbes ROC pour évaluer la qualite de la prediction dans le data train et le data test
+
+Construction des courbes ROC: on utlise les fonctions prediction et Performanceormance du package ROCR comme suit:
+
+```{r}
+Predi=prediction(train_pred$PredictedProb,train_pred$Class)
+Perfo=performance(Predi,"tpr","fpr")
+plot(Perfo,col="blue", main='ROC apprentissage')
+```
+
+Pour évaluer la qualité de la prédiction, on utilise l'indicateur AUC, qui est l'aire sous la courbe ROC.
+Plus l'aire se rapproche de 1 et plus la qualité de la prédiction est bien, cela est l'opposé quand se rapproche de 0
+La courbe ROC indique donc que l'AUC est très elevé
+
+```{r}
+perform<-performance(Predi,'auc')
+perform@y.values[[1]]
+```
+
+La valeur de l'AUC est à peu près 0.98, ce qui veut dire, que la prédiction est très bonne
+
+Faisons la meme chose, mais sur le datatest cette fois-ci
+
+```{r}
+Predtest=prediction(test_p$fit,test_p$Class)
+Perftest=performance(Predtest,"tpr","fpr")
+perftest=performance(Predtest,"auc")
+perftest@y.values[[1]] #On trouve AUC=0.9772065, ce qui montre qu'il y a une bonne prédiction
+
+par(mfrow=c(1,2))
+plot(Perfo,col="blue", main='ROC apprentissage')
+plot(Perftest, col="blue", main='ROC test')
+```
+
+-------------------------------------------
+Conclusion: Toutes ces métriques, nous permettent de valider notre modele de regression logistique et les variables que l'on a ecartées pour construire ce dernier. 
